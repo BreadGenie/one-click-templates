@@ -1,0 +1,34 @@
+name: runway-cache
+title: Runway Cache
+description: Regional runner cache for Runway operators only. Users should not launch this app.
+documentation: https://frappe.github.io/central/apps/runway-cache
+maintainers:
+  - github: BreadGenie
+base_image:
+  os: Ubuntu
+  os_version: "24.04"
+  minimal: true
+minimum_size:
+  cpu_millicores: 1000
+  memory_mib: 1024
+  disk_mib: 8192
+ports:
+  - { port: 8443, protocol: tcp }
+build:
+  files:
+    - { source: src/etc/, destination: /etc/ }
+    - { source: src/var/, destination: /var/ }
+    - { source: src/usr/, destination: /usr/ }
+inputs:
+  - name: runway_url
+    label: Runway HTTPS origin
+    type: text
+    required: true
+  - name: runway_region
+    label: Runway Region
+    type: text
+    required: true
+  - name: runway_enrolment_token
+    label: One-use enrolment token
+    type: password
+    required: true

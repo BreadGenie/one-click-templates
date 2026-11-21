@@ -1,0 +1,74 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+# shellcheck disable=SC1091
+. /usr/local/lib/one-click/lib.sh
+[[ -e $ONE_CLICK_READY ]] && exit 0
+# shellcheck disable=SC1090
+. "$ONE_CLICK_INPUTS"
+: "${RUNWAY_URL:?Runway site origin required}"
+: "${RUNWAY_REGION:?Runway Region required}"
+: "${RUNWAY_ENROLMENT_TOKEN:?Runway enrolment token required}"
+export RUNWAY_URL RUNWAY_REGION
+
+install -d -m 0700 /etc/runway
+printf '%s\n' "$RUNWAY_ENROLMENT_TOKEN" > /etc/runway/enrolment-token
+unset RUNWAY_ENROLMENT_TOKEN
+
+# Atlas may configure the VM's mesh address just before cloud-final.
+mesh_address() {
+    ip -6 -o addr show scope global | awk '$4 ~ /^fdaa:/ && $0 !~ / tentative / { sub(/\/.*/, "", $4); print $4 }'
+}
+has_mesh_address() {
+    [[ -n $(mesh_address) ]]
+}
+wait_for 60 has_mesh_address
+export RUNWAY_MESH_ADDRESS
+RUNWAY_MESH_ADDRESS=$(mesh_address)
+
+if [[ -n ${RUNWAY_SITE_CA_BASE64:-} ]]; then
+    printf '%s' "$RUNWAY_SITE_CA_BASE64" | base64 --decode > /etc/runway/site-ca.pem
+fi
+if [[ -n ${RUNWAY_STORAGE_CA_BASE64:-} ]]; then
+    printf '%s' "$RUNWAY_STORAGE_CA_BASE64" | base64 --decode > /etc/runway/storage-ca.pem
+else
+    touch /etc/runway/storage-ca.pem
+fi
+
+python3 - <<'PY'
+import ipaddress
+import json
+import os
+from pathlib import Path
+
+address = ipaddress.IPv6Address(os.environ["RUNWAY_MESH_ADDRESS"].strip())
+base = Path("/etc/runway")
+config = {
+    "version": 1,
+    "region_id": os.environ["RUNWAY_REGION"],
+    "mesh_region_id": int.from_bytes(address.packed[2:4], "big"),
+    "listen": f"[{address}]:8443",
+    "audience": "https://127.0.0.1:18445",
+    "certificate_file": str(base / "certificate.pem"),
+    "private_key_file": str(base / "tls-key.pem"),
+    "signing_key_file": str(base / "signing-key.pem"),
+    "cache_data_ca_file": str(base / "cache-ca.pem"),
+    "runway_url": os.environ["RUNWAY_URL"],
+    "runway_ca_file": str(base / "site-ca.pem") if (base / "site-ca.pem").is_file() else "",
+    "runway_credential_file": str(base / "credential"),
+    "archive_bytes": 1 << 30,
+}
+staged = base / "cache-service.json.new"
+staged.write_text(json.dumps(config) + "\n")
+staged.replace(base / "cache-service.json")
+PY
+
+runway-controller --action cache-service-init --config /etc/runway/cache-service.json
+# shellcheck disable=SC1091
+. /usr/local/lib/one-click/runway-enrol.sh
+enrol_runway_cache /etc/runway/cache-service.json
+rm -f /etc/runway/enrolment-token
+systemctl daemon-reload
+systemctl enable --now runway-cache-data.service runway-cache-service.service
+mark_ready
+rm -f "$ONE_CLICK_INPUTS"
